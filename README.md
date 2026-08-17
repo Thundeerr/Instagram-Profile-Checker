@@ -17,6 +17,12 @@ gilt lokal fuer alle Accounts. Die Oberflaeche passt Karten, Tabellen und Button
 dynamisch an die Fenstergroesse an; eine Mindestgroesse verhindert abgeschnittene
 oder ueberlappende Bedienelemente.
 
+Automatische `private -> public`-Ereignisse besitzen einen konfigurierbaren
+Cooldown pro Account. Dadurch erzeugen schnelle Statuswechsel keine doppelten
+Events. Manuelle Demo-Ereignisse bleiben jederzeit moeglich. Simulierte Orders
+wechseln lokal von `Pending` ueber `In Progress` zu `Completed`; jeder Wechsel
+wird nachvollziehbar in `events.jsonl` gespeichert.
+
 Jeder aktive Account verbraucht einen RapidAPI-Request pro Scanintervall. Bei
 zehn Accounts und einem 30-Minuten-Intervall entstehen beispielsweise ungefaehr
 14.400 Requests pro Monat.
@@ -64,6 +70,7 @@ Die simulierte Menge kann in `.env` angepasst werden:
 
 ```text
 PANEL_SIMULATED_QUANTITY=1000
+EVENT_COOLDOWN_MINUTES=1440
 ```
 
 `mock_panel.py` ist absichtlich ein rein lokaler Prank-Adapter: Er fuehrt keine

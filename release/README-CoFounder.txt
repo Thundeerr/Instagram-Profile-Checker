@@ -15,6 +15,8 @@ Pro Installation koennen mehrere Accounts gleichzeitig ueberwacht werden. Jeder
 aktive Account verbraucht einen RapidAPI-Request pro Scanintervall.
 Das Fenster kann frei vergroessert oder maximiert werden. Eine Mindestgroesse
 verhindert, dass Tabellen und Bedienelemente abgeschnitten werden.
+Der Event-Cooldown verhindert doppelte automatische Ausloesungen pro Account.
+Demo-Orders durchlaufen lokal Pending, In Progress und Completed.
 
 Die Panel-Order ist eine reine lokale Simulation (Dry-Run). Es werden keine echten
 Bestellungen an JustAnotherPanel oder andere Anbieter gesendet.

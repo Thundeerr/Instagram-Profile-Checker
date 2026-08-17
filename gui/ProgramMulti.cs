@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -82,6 +83,7 @@ namespace InstagramProfileChecker
         private string apiKey = "";
         private int intervalMinutes = 30;
         private int simulatedQuantity = 1000;
+        private int eventCooldownMinutes = 1440;
         private bool configIsValid;
         private bool rebuildingAccountGrid;
 
@@ -479,6 +481,8 @@ namespace InstagramProfileChecker
                 intervalMinutes = parsed;
             if (values.TryGetValue("PANEL_SIMULATED_QUANTITY", out raw) && int.TryParse(raw, out parsed) && parsed > 0)
                 simulatedQuantity = parsed;
+            if (values.TryGetValue("EVENT_COOLDOWN_MINUTES", out raw) && int.TryParse(raw, out parsed) && parsed > 0)
+                eventCooldownMinutes = parsed;
 
             configIsValid = !string.IsNullOrWhiteSpace(apiKey) && apiKey != "dein_rapidapi_key";
             configLabel.Text = configIsValid ? "RapidAPI bereit" : ".env / RapidAPI-Key fehlt";
@@ -654,6 +658,7 @@ namespace InstagramProfileChecker
             }
             ProcessNextQueuedCheck();
             UpdateAccountGridLive();
+            UpdateSimulatedOrderLifecycle();
         }
 
         private void QueueSelectedAccount()
@@ -740,13 +745,15 @@ namespace InstagramProfileChecker
                 AppendLog("@" + username + ": is_private = " + result.IsPrivate.ToString().ToLowerInvariant());
                 if (becamePublic)
                 {
-                    System.Media.SystemSounds.Exclamation.Play();
-                    CreateMockOrder(username, false);
-                    MessageBox.Show(this,
-                        "@" + username + " ist jetzt öffentlich. Eine Demo-Order wurde erzeugt.",
-                        "Profil ist öffentlich",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
+                    if (CreateMockOrder(username, false))
+                    {
+                        System.Media.SystemSounds.Exclamation.Play();
+                        MessageBox.Show(this,
+                            "@" + username + " ist jetzt öffentlich. Eine Demo-Order wurde erzeugt.",
+                            "Profil ist öffentlich",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Information);
+                    }
                 }
             }
 
@@ -893,7 +900,7 @@ namespace InstagramProfileChecker
 
         private void ShowSettingsDialog()
         {
-            Form dialog = NewDialog("Lokale Einstellungen", new Size(520, 390));
+            Form dialog = NewDialog("Lokale Einstellungen", new Size(520, 465));
             Label heading = NewLabel("Scanner-Einstellungen", 16F, FontStyle.Bold, TextPrimary);
             heading.Location = new Point(28, 22);
             heading.AutoSize = true;
@@ -932,15 +939,24 @@ namespace InstagramProfileChecker
             quantityBox.Width = 220;
             quantityBox.Maximum = 10000000;
             quantityBox.Value = Math.Max(1, Math.Min(10000000, simulatedQuantity));
+            Label cooldownLabel = NewLabel("Event-Cooldown pro Account (Min.)", 9F, FontStyle.Bold, TextMuted);
+            cooldownLabel.Location = new Point(30, 263);
+            cooldownLabel.AutoSize = true;
+            NumericUpDown cooldownBox = NewSettingsNumber();
+            cooldownBox.Location = new Point(30, 286);
+            cooldownBox.Width = 215;
+            cooldownBox.Minimum = 1;
+            cooldownBox.Maximum = 525600;
+            cooldownBox.Value = Math.Max(1, Math.Min(525600, eventCooldownMinutes));
             Label quotaHint = NewLabel("Hinweis: Jeder aktive Account verbraucht einen Request pro Intervall.", 8.5F, FontStyle.Regular, Amber);
-            quotaHint.Location = new Point(30, 263);
+            quotaHint.Location = new Point(30, 335);
             quotaHint.AutoSize = true;
             Button cancel = NewButton("Abbrechen", SurfaceLight);
-            cancel.Location = new Point(140, 325);
+            cancel.Location = new Point(140, 397);
             cancel.Size = new Size(160, 40);
             cancel.DialogResult = DialogResult.Cancel;
             Button save = NewButton("Speichern", Purple);
-            save.Location = new Point(320, 325);
+            save.Location = new Point(320, 397);
             save.Size = new Size(170, 40);
             save.Click += delegate
             {
@@ -957,7 +973,8 @@ namespace InstagramProfileChecker
                     "RAPIDAPI_KEY=" + newKey,
                     "INSTAGRAM_USERNAME=" + fallbackUsername,
                     "CHECK_INTERVAL_MINUTES=" + Convert.ToInt32(intervalBox.Value),
-                    "PANEL_SIMULATED_QUANTITY=" + Convert.ToInt32(quantityBox.Value)
+                    "PANEL_SIMULATED_QUANTITY=" + Convert.ToInt32(quantityBox.Value),
+                    "EVENT_COOLDOWN_MINUTES=" + Convert.ToInt32(cooldownBox.Value)
                 };
                 File.WriteAllLines(envPath, lines, new UTF8Encoding(false));
                 dialog.DialogResult = DialogResult.OK;
@@ -972,6 +989,8 @@ namespace InstagramProfileChecker
             dialog.Controls.Add(intervalBox);
             dialog.Controls.Add(quantityLabel);
             dialog.Controls.Add(quantityBox);
+            dialog.Controls.Add(cooldownLabel);
+            dialog.Controls.Add(cooldownBox);
             dialog.Controls.Add(quotaHint);
             dialog.Controls.Add(cancel);
             dialog.Controls.Add(save);
@@ -1150,8 +1169,15 @@ namespace InstagramProfileChecker
             return error.Message;
         }
 
-        private void CreateMockOrder(string username, bool manual)
+        private bool CreateMockOrder(string username, bool manual)
         {
+            TimeSpan remaining;
+            if (!manual && TryGetEventCooldown(username, out remaining))
+            {
+                int minutes = Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes));
+                AppendLog("Event für @" + username + " unterdrückt: Cooldown noch " + minutes + " Min.");
+                return false;
+            }
             Random random = new Random(Guid.NewGuid().GetHashCode());
             Dictionary<string, object> order = new Dictionary<string, object>();
             order["order_id"] = "JAP-DEMO-" + random.Next(100000, 999999);
@@ -1163,14 +1189,82 @@ namespace InstagramProfileChecker
             order["mode"] = "dry_run";
             order["created_at"] = DateTime.UtcNow.ToString("o");
             Dictionary<string, object> eventData = new Dictionary<string, object>();
+            eventData["schema_version"] = 1;
+            eventData["event_id"] = Guid.NewGuid().ToString();
             eventData["event"] = manual ? "manual_demo_order" : "profile_became_public";
             eventData["username"] = username;
             eventData["detected_at"] = DateTime.UtcNow.ToString("o");
             eventData["mode"] = "dry_run";
+            eventData["cooldown_minutes"] = eventCooldownMinutes;
             eventData["mock_order"] = order;
             File.AppendAllText(eventsPath, json.Serialize(eventData) + Environment.NewLine, Encoding.UTF8);
             AddOrderToGrid(order);
             AppendLog("Demo-Order für @" + username + " erzeugt: " + DictValue(order, "order_id"));
+            return true;
+        }
+
+        private bool TryGetEventCooldown(string username, out TimeSpan remaining)
+        {
+            remaining = TimeSpan.Zero;
+            if (!File.Exists(eventsPath)) return false;
+            DateTime latest = DateTime.MinValue;
+            try
+            {
+                foreach (string line in File.ReadAllLines(eventsPath, Encoding.UTF8))
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    Dictionary<string, object> item = json.Deserialize<Dictionary<string, object>>(line);
+                    if (DictValue(item, "event") != "profile_became_public") continue;
+                    if (!string.Equals(DictValue(item, "username").TrimStart('@'), username.TrimStart('@'),
+                        StringComparison.OrdinalIgnoreCase)) continue;
+                    DateTime detected;
+                    if (!DateTime.TryParse(DictValue(item, "detected_at"), CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind, out detected)) continue;
+                    detected = detected.ToUniversalTime();
+                    if (detected > latest) latest = detected;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            if (latest == DateTime.MinValue) return false;
+            remaining = latest.AddMinutes(eventCooldownMinutes) - DateTime.UtcNow;
+            return remaining > TimeSpan.Zero;
+        }
+
+        private void UpdateSimulatedOrderLifecycle()
+        {
+            if (ordersGrid == null) return;
+            foreach (DataGridViewRow row in ordersGrid.Rows)
+            {
+                Dictionary<string, object> order = row.Tag as Dictionary<string, object>;
+                if (order == null || DictValue(order, "mode") != "dry_run") continue;
+                DateTime created;
+                if (!DateTime.TryParse(DictValue(order, "created_at"), CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out created)) continue;
+                double age = (DateTime.UtcNow - created.ToUniversalTime()).TotalSeconds;
+                string nextStatus = age >= 30 ? "Completed" : age >= 8 ? "In Progress" : "Pending";
+                if (DictValue(order, "status") == nextStatus) continue;
+                order["status"] = nextStatus;
+                row.Cells["status"].Value = nextStatus;
+                Dictionary<string, object> eventData = new Dictionary<string, object>();
+                eventData["schema_version"] = 1;
+                eventData["event_id"] = Guid.NewGuid().ToString();
+                eventData["event"] = "demo_order_status_changed";
+                eventData["username"] = UsernameFromTarget(DictValue(order, "target"));
+                eventData["detected_at"] = DateTime.UtcNow.ToString("o");
+                eventData["mode"] = "dry_run";
+                eventData["mock_order"] = new Dictionary<string, object>(order);
+                File.AppendAllText(eventsPath, json.Serialize(eventData) + Environment.NewLine, Encoding.UTF8);
+                AppendLog("Demo-Order " + DictValue(order, "order_id") + ": " + nextStatus);
+            }
+        }
+
+        private static string UsernameFromTarget(string target)
+        {
+            if (string.IsNullOrWhiteSpace(target)) return "";
+            return target.TrimEnd('/').Substring(target.TrimEnd('/').LastIndexOf('/') + 1);
         }
 
         private void LoadOrderHistory()
@@ -1196,16 +1290,33 @@ namespace InstagramProfileChecker
 
         private void AddOrderToGrid(Dictionary<string, object> order)
         {
+            string orderId = DictValue(order, "order_id");
             string createdAt = DictValue(order, "created_at");
             DateTime parsed;
             if (DateTime.TryParse(createdAt, out parsed)) createdAt = parsed.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss");
-            ordersGrid.Rows.Insert(0,
-                DictValue(order, "order_id"),
-                DictValue(order, "target"),
-                DictValue(order, "quantity"),
-                DictValue(order, "status"),
-                createdAt,
-                DictValue(order, "mode"));
+            DataGridViewRow existing = null;
+            foreach (DataGridViewRow row in ordersGrid.Rows)
+                if (Convert.ToString(row.Cells["order_id"].Value) == orderId) { existing = row; break; }
+            if (existing == null)
+            {
+                ordersGrid.Rows.Insert(0,
+                    orderId,
+                    DictValue(order, "target"),
+                    DictValue(order, "quantity"),
+                    DictValue(order, "status"),
+                    createdAt,
+                    DictValue(order, "mode"));
+                existing = ordersGrid.Rows[0];
+            }
+            else
+            {
+                existing.Cells["target"].Value = DictValue(order, "target");
+                existing.Cells["quantity"].Value = DictValue(order, "quantity");
+                existing.Cells["status"].Value = DictValue(order, "status");
+                existing.Cells["created_at"].Value = createdAt;
+                existing.Cells["mode"].Value = DictValue(order, "mode");
+            }
+            existing.Tag = new Dictionary<string, object>(order);
             ordersGrid.ClearSelection();
             ordersGrid.CurrentCell = null;
             if (ordersGrid.Rows.Count > 100) ordersGrid.Rows.RemoveAt(ordersGrid.Rows.Count - 1);
