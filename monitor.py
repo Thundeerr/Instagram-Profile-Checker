@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from event_system import JsonlEventStore
 from mock_panel import JustAnotherPanelMock
 
 
@@ -45,6 +46,7 @@ class Config:
     username: str
     interval_minutes: int
     mock_quantity: int = 1000
+    event_cooldown_minutes: int = 1440
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -55,8 +57,9 @@ class Config:
         try:
             interval_minutes = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
             mock_quantity = int(os.getenv("PANEL_SIMULATED_QUANTITY", "1000"))
+            event_cooldown_minutes = int(os.getenv("EVENT_COOLDOWN_MINUTES", "1440"))
         except ValueError as exc:
-            raise ValueError("Intervall und simulierte Menge muessen ganze Zahlen sein.") from exc
+            raise ValueError("Intervall, Cooldown und simulierte Menge muessen ganze Zahlen sein.") from exc
 
         if not api_key or api_key == "dein_rapidapi_key":
             raise ValueError("RAPIDAPI_KEY fehlt. Kopiere .env.example nach .env und trage den Key ein.")
@@ -66,12 +69,15 @@ class Config:
             raise ValueError("CHECK_INTERVAL_MINUTES muss mindestens 1 sein.")
         if mock_quantity < 1:
             raise ValueError("PANEL_SIMULATED_QUANTITY muss mindestens 1 sein.")
+        if event_cooldown_minutes < 1:
+            raise ValueError("EVENT_COOLDOWN_MINUTES muss mindestens 1 sein.")
 
         return cls(
             api_key=api_key,
             username=username,
             interval_minutes=interval_minutes,
             mock_quantity=mock_quantity,
+            event_cooldown_minutes=event_cooldown_minutes,
         )
 
 
@@ -137,22 +143,34 @@ def write_state(username: str, is_private: bool) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
-def record_public_event(username: str, quantity: int) -> None:
+def record_public_event(
+    username: str,
+    quantity: int,
+    cooldown_minutes: int = 1440,
+    manual: bool = False,
+) -> bool:
     order = JustAnotherPanelMock().create_order(username, quantity)
     event = {
-        "event": "profile_became_public",
+        "event": "manual_demo_order" if manual else "profile_became_public",
         "username": username,
-        "detected_at": utc_now(),
         "mode": "dry_run",
         "mock_order": order.to_dict(),
     }
-    with EVENTS_FILE.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    claim = JsonlEventStore(EVENTS_FILE).claim(
+        event,
+        cooldown_minutes=cooldown_minutes,
+        force=manual,
+    )
+    if not claim.emitted:
+        minutes = max(1, (claim.remaining_seconds + 59) // 60)
+        print(f"Event fuer @{username} unterdrueckt: Cooldown noch {minutes} Min.")
+        return False
 
     print("\a", end="", flush=True)
     print(f"\n*** @{username} IST JETZT OEFFENTLICH ***")
     print(f"Demo-Order: {order.order_id} | {order.quantity} | {order.status}")
     print(f"Dry-Run-Ereignis gespeichert: {EVENTS_FILE}")
+    return True
 
 
 def check_once(config: Config) -> bool:
@@ -171,8 +189,12 @@ def check_once(config: Config) -> bool:
 
     became_public = was_private and not is_private
     if became_public:
-        record_public_event(config.username, config.mock_quantity)
-    return became_public
+        return record_public_event(
+            config.username,
+            config.mock_quantity,
+            config.event_cooldown_minutes,
+        )
+    return False
 
 
 def run_forever(config: Config) -> None:
@@ -203,7 +225,8 @@ def main() -> int:
             load_dotenv(ROOT / ".env")
             username = os.getenv("INSTAGRAM_USERNAME", "thunderceo").strip().lstrip("@")
             quantity = int(os.getenv("PANEL_SIMULATED_QUANTITY", "1000"))
-            record_public_event(username, quantity)
+            cooldown = int(os.getenv("EVENT_COOLDOWN_MINUTES", "1440"))
+            record_public_event(username, quantity, cooldown, manual=True)
             return 0
 
         config = Config.from_env()
