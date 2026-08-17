@@ -1,0 +1,12 @@
+.env
+state.json
+accounts.json
+events.jsonl
+__pycache__/
+*.pyc
+
+# Lokale Build- und Release-Artefakte (werden ueber GitHub Releases verteilt)
+/InstagramProfileChecker.exe
+/release/*.exe
+/release/*.zip
+/release/InstagramProfileChecker-v1/
